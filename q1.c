@@ -2,6 +2,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
 
 typedef struct {
     uint32_t *data;
@@ -32,7 +35,7 @@ void mpi_enlarge(mpi_t rop, size_t capacity)
 
         if (!rop->data && capacity != 0) {
             fprintf(stderr,  "Out of memory (%zu words requested)\n", capacity);
-            abourt();
+            abort();
         }
 
         for (size_t n = min; n < capacity; ++n)
@@ -72,6 +75,32 @@ static size_t ceil_div(size_t n, size_t d)
 
 #define INTMAX 0x7fffffff
 
+void mpi_set(mpi_t rop, const mpi_t op)
+{
+    mpi_enlarge(rop, op->capacity);
+
+    for (size_t n = 0; n < op->capacity; ++n)
+        rop->data[n] = op->data[n];
+
+    for (size_t n = op->capacity; n < rop->capacity; ++n)
+        rop->data[n] = 0;
+}
+
+void mpi_set_u32(mpi_t rop, uint32_t op)
+{
+    size_t capacity = ceil_div(32, 31);
+
+    mpi_enlarge(rop, capacity);
+
+    for (size_t n = 0; n < capacity; ++n) {
+        rop->data[n] = op & INTMAX;
+        op >>= 31;
+    }
+
+    for (size_t n = capacity; n < rop->capacity; ++n)
+        rop->data[n] = 0;
+}
+
 void mpi_set_u64(mpi_t rop, uint64_t op)
 {
     size_t capacity = ceil_div(64, 31);
@@ -87,11 +116,11 @@ void mpi_set_u64(mpi_t rop, uint64_t op)
         rop->data[n] = 0;
 }
 
-static void mpi_mul_native(mpi_t rop, const mpi_t op1, const mpi_t op2)
+/* Naive multiplication */
+static void mpi_mul_naive(mpi_t rop, const mpi_t op1, const mpi_t op2)
 {
     size_t capacity = op1->capacity + op2->capacity;
 
-    // tmp var to store mul result
     mpi_t tmp;
     mpi_init(tmp);
 
@@ -99,19 +128,16 @@ static void mpi_mul_native(mpi_t rop, const mpi_t op1, const mpi_t op2)
 
     for (size_t n = 0; n < tmp->capacity; ++n)
         tmp->data[n] = 0;
-    // uint32 multiple
+
     for (size_t n = 0; n < op1->capacity; ++n) {
-        for (size_t m = 0; m < op2->capacity; ++n) {
-            // at most 64bit long 
+        for (size_t m = 0; m < op2->capacity; ++m) {
             uint64_t r = (uint64_t) op1->data[n] * op2->data[m];
-            // carrying bit
             uint64_t c = 0;
             for (size_t k = m+n; c || r; ++k) {
                 if (k >= tmp->capacity)
                     mpi_enlarge(tmp, tmp->capacity + 1);
                 tmp->data[k] += (r & INTMAX) + c;
-                // 32 bit long, shift 31 bit
-                r >> 31;
+                r >>= 31;
                 c = tmp->data[k] >> 31;
                 tmp->data[k] &= INTMAX;
             }
@@ -119,9 +145,76 @@ static void mpi_mul_native(mpi_t rop, const mpi_t op1, const mpi_t op2)
     }
 
     mpi_set(rop, tmp);
+
     mpi_compact(rop);
 
     mpi_clear(tmp);
+}
+
+void mpi_mul_u32(mpi_t rop, const mpi_t op1, uint32_t op2)
+{
+    size_t capacity = op1->capacity + 1;
+
+    mpi_enlarge(rop, capacity);
+
+    uint32_t c = 0;
+
+    /* op1 * op2 */
+    for (size_t n = 0; n < op1->capacity; ++n) {
+        assert(op1->data[n] <= (UINT64_MAX - c)/ op2);
+        uint64_t r = (uint64_t) op1->data[n] * op2 + c;
+        rop->data[n] = r & INTMAX;
+        c = r >>= 31;
+    }
+
+    // has carrying digit left
+    while (c != 0) {
+        mpi_enlarge(rop, capacity+1);
+        rop->data[capacity] = c & INTMAX;
+        c >>= 31;
+    }
+}
+
+void mpi_add_u32(mpi_t rop, const mpi_t op1, uint32_t op2)
+{
+    size_t capacity =
+        op1->capacity > ceil_div(32, 31) ? op1->capacity : ceil_div(32, 31);
+
+    mpi_enlarge(rop, capacity);
+
+    uint32_t c = 0;
+
+    /* op1 + op2 */
+    for (size_t n = 0; n < rop->capacity; ++n) {
+        uint32_t r1 = (n < op1->capacity) ? op1->data[n] : 0;
+        uint32_t r2 = op2 & INTMAX;
+        op2 >>= 31;
+        rop->data[n] = r1 + r2 + c;
+        c = rop->data[n] >> 31;
+        rop->data[n] &= INTMAX;
+    }
+
+    if (c != 0) {
+        mpi_enlarge(rop, capacity + 1);
+        rop->data[capacity] = 0 + c;
+    }
+}
+
+int mpi_set_str(mpi_t rop, const char *str, int base)
+{
+    assert(base == 10); /* only decimal integers */
+
+    size_t len = strlen(str);
+
+    mpi_set_u32(rop, 0U);
+
+    for (size_t i = 0; i < len; i++) {
+        mpi_mul_u32(rop, rop, 10U);
+        assert(str[i] >= '0' && str[i] <= '9');
+        mpi_add_u32(rop, rop, (uint32_t) (str[i] - '0'));
+    }
+
+    return 0;
 }
 
 int mpi_cmp(const mpi_t op1, const mpi_t op2)
@@ -339,6 +432,21 @@ void mpi_gcd(mpi_t rop, const mpi_t op1, const mpi_t op2)
 
 int main()
 {
+    printf("mpi_mul_native\n");
+    {
+        mpi_t a0, a1, r1;
+        mpi_init(a0);
+        mpi_init(a1);
+        mpi_init(r1);
+        mpi_set_str(a0, "12345", 10);
+        mpi_set_str(a1, "2345", 10);
+        mpi_mul_native(r1, a0, a1);
+        assert(mpi_cmp_u32(r1, 28949025) == 0);
+
+        mpi_clear(a0);
+        mpi_clear(a1);
+        mpi_clear(r1);
+    }
     printf("mpi_fdiv_qr\n");
     {
         mpi_t n, d, q, r;

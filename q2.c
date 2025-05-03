@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 
 /* Nonzero if X is not aligned on a "long" boundary */
 #define UNALIGNED(X) ((long) X & (sizeof(long) - 1))
