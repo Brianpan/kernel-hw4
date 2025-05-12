@@ -5,3 +5,6 @@ q1: q1.o
 	$(CC) $(CFLAGS) -o $@ $^
 q2: q2.o
 	$(CC) $(CFLAGS) -o $@ $^
+
+chat: chat.o
+	$(CC) $(CFLAGS) -o $@ $^
